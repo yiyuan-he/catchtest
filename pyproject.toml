@@ -1,0 +1,25 @@
+[project]
+name = "catchtest"
+version = "0.1.0"
+description = "Just-in-time catching test generation CLI tool"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.0",
+    "anthropic>=0.40.0",
+    "pyyaml>=6.0",
+    "rich>=13.0",
+]
+
+[project.scripts]
+catchtest = "catchtest.cli:cli"
+
+[project.optional-dependencies]
+bedrock = ["boto3>=1.34.0"]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

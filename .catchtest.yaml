@@ -1,0 +1,24 @@
+# CatchTest configuration
+llm:
+  provider: anthropic          # anthropic | openai | ollama | bedrock
+  model: claude-sonnet-4-20250514
+  api_key_env: ANTHROPIC_API_KEY  # env var name containing the key
+  # Bedrock-specific (only used when provider: bedrock):
+  # aws_region: us-east-1
+  # aws_profile: default
+
+test:
+  language: python             # python | javascript | typescript | java
+  framework: pytest            # pytest | unittest | jest | vitest | junit
+  timeout_seconds: 30          # per-test execution timeout
+  max_tests_per_diff: 10       # cap on generated tests
+
+assessment:
+  enable_llm_judge: true
+  enable_rule_based: true
+  fp_threshold: -0.5           # below this score, auto-discard as false positive
+  tp_threshold: 0.5            # above this score, flag as likely true positive
+
+output:
+  verbosity: normal            # quiet | normal | verbose
+  format: terminal             # terminal | json | markdown
