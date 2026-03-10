@@ -8,11 +8,18 @@ from pathlib import Path
 
 import yaml
 
+DEFAULT_MODELS = {
+    "anthropic": "claude-sonnet-4-20250514",
+    "bedrock": "us.anthropic.claude-sonnet-4-6",
+    "openai": "gpt-4o",
+    "ollama": "llama3",
+}
+
 
 @dataclass
 class LLMConfig:
     provider: str = "anthropic"  # anthropic | openai | ollama | bedrock
-    model: str = "claude-sonnet-4-20250514"
+    model: str = DEFAULT_MODELS["anthropic"]
     api_key_env: str = "ANTHROPIC_API_KEY"
     aws_region: str | None = None
     aws_profile: str | None = None
@@ -67,6 +74,7 @@ def load_config(
     3. Fall back to defaults
     """
     config = CatchTestConfig()
+    yaml_set_model = False
 
     # Find and load YAML config
     if config_path is None:
@@ -78,6 +86,7 @@ def load_config(
 
         if "llm" in raw:
             _merge_dict_into_dataclass(config.llm, raw["llm"])
+            yaml_set_model = "model" in raw["llm"]
         if "test" in raw:
             _merge_dict_into_dataclass(config.test, raw["test"])
         if "assessment" in raw:
@@ -99,6 +108,13 @@ def load_config(
             config.output.verbosity = "verbose"
         if "format" in cli_overrides and cli_overrides["format"] is not None:
             config.output.format = cli_overrides["format"]
+
+    # Auto-resolve model if provider was set but model was not explicitly chosen
+    cli_set_model = cli_overrides and cli_overrides.get("model") is not None
+    if not cli_set_model and not yaml_set_model:
+        config.llm.model = DEFAULT_MODELS.get(
+            config.llm.provider, DEFAULT_MODELS["anthropic"]
+        )
 
     # Resolve aws_region from environment if not set
     if config.llm.provider == "bedrock" and config.llm.aws_region is None:

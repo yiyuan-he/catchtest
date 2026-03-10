@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 
-def aggregate(rule_score: float, llm_score: float) -> tuple[float, str]:
+def aggregate(
+    rule_score: float,
+    llm_score: float,
+) -> tuple[float, str]:
     """Aggregate rule-based and LLM judge scores.
 
     Returns (combined_score, verdict) where verdict is one of:

@@ -90,7 +90,7 @@ def report_json(assessed: list[tuple[WeakCatch, float, str, dict]]) -> None:
     """Output results as JSON."""
     results = []
     for catch, score, verdict, judge_data in assessed:
-        results.append({
+        entry = {
             "file": catch.test.target_file,
             "risk": catch.test.target_risk,
             "workflow": catch.test.workflow,
@@ -99,7 +99,8 @@ def report_json(assessed: list[tuple[WeakCatch, float, str, dict]]) -> None:
             "behavior_change_summary": judge_data.get("behavior_change_summary", ""),
             "explanation": judge_data.get("explanation", ""),
             "classification": judge_data.get("classification", ""),
-        })
+        }
+        results.append(entry)
     print(json.dumps({"results": results, "total": len(results)}, indent=2))
 
 

@@ -164,7 +164,9 @@ def _run_pipeline(
         llm_score = 0.0
         if config.assessment.enable_llm_judge:
             try:
-                llm_score, judge_data = assess_llm_judge(client, catch, diff_context)
+                llm_score, judge_data = assess_llm_judge(
+                    client, catch, diff_context,
+                )
             except Exception as e:
                 logger.warning("LLM judge failed: %s", e)
 

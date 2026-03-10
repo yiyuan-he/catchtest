@@ -61,4 +61,5 @@ def build_judge_prompt(
         failure_message=failure_message or "No failure message captured",
         failure_traceback=failure_traceback or "No traceback captured",
     )
+
     return SYSTEM_PROMPT, [{"role": "user", "content": user_content}]
