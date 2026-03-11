@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from catchtest.core.weak_catch import GeneratedTest
@@ -14,6 +15,7 @@ if TYPE_CHECKING:
     from catchtest.config import CatchTestConfig
     from catchtest.core.diff_extractor import ChangedFile, DiffContext
     from catchtest.llm import LLMClient
+    from catchtest.telemetry.reader import TelemetryContext
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +29,14 @@ def _parse_json_response(text: str) -> dict:
         # Remove first and last lines (fences)
         lines = [l for l in lines[1:] if not l.strip().startswith("```")]
         text = "\n".join(lines)
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Fallback: extract JSON object when LLM returns narrative before/after JSON
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            return json.loads(match.group())
+        raise
 
 
 def _syntax_check(code: str) -> bool:
@@ -39,10 +48,58 @@ def _syntax_check(code: str) -> bool:
         return False
 
 
+def _extract_focused_context(
+    full_content: str,
+    diff_hunks: list[str],
+    max_chars: int = 5000,
+    context_lines: int = 50,
+) -> str:
+    """Extract content around changed regions rather than truncating from file start."""
+    if not full_content or not diff_hunks:
+        return full_content[:max_chars]
+
+    lines = full_content.splitlines()
+
+    # Parse line ranges from @@ headers
+    changed_ranges: list[tuple[int, int]] = []
+    for hunk in diff_hunks:
+        for match in re.finditer(r"@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@", hunk):
+            start = int(match.group(1))
+            count = int(match.group(2)) if match.group(2) else 1
+            changed_ranges.append((start, start + count - 1))
+
+    if not changed_ranges:
+        return full_content[:max_chars]
+
+    # Expand each range with context and merge overlapping regions
+    regions: list[tuple[int, int]] = []
+    for start, end in sorted(changed_ranges):
+        region_start = max(1, start - context_lines)
+        region_end = min(len(lines), end + context_lines)
+        if regions and region_start <= regions[-1][1] + 1:
+            regions[-1] = (regions[-1][0], max(regions[-1][1], region_end))
+        else:
+            regions.append((region_start, region_end))
+
+    # Build output with "..." markers between non-contiguous regions
+    parts: list[str] = []
+    for i, (start, end) in enumerate(regions):
+        if i > 0:
+            parts.append("...")
+        # Line numbers are 1-indexed, list is 0-indexed
+        parts.append("\n".join(lines[start - 1 : end]))
+
+    result = "\n".join(parts)
+    if len(result) > max_chars:
+        result = result[:max_chars]
+    return result
+
+
 def infer_intent(
     client: LLMClient,
     diff_context: DiffContext,
     changed_file: ChangedFile,
+    telemetry_ctx: TelemetryContext | None = None,
 ) -> tuple[str, list[str]]:
     """Infer the intent and risks of a diff using an LLM.
 
@@ -53,13 +110,20 @@ def infer_intent(
         for f in diff_context.changed_files
     )
 
-    file_context = f"File: {changed_file.path}\n```\n{changed_file.parent_content[:3000]}\n```"
+    focused = _extract_focused_context(changed_file.parent_content, changed_file.diff_hunks, max_chars=3000)
+    file_context = f"File: {changed_file.path}\n```\n{focused}\n```"
+
+    telemetry_section = ""
+    if telemetry_ctx and telemetry_ctx.has_data:
+        from catchtest.telemetry.formatter import format_for_risk_analysis
+        telemetry_section = format_for_risk_analysis(telemetry_ctx)
 
     system, messages = build_intent_prompt(
         commit_message=diff_context.commit_message,
         diff_text=diff_context.diff_text[:5000],  # Truncate very large diffs
         changed_files_summary=files_summary,
         file_context=file_context,
+        telemetry_section=telemetry_section,
     )
 
     try:
@@ -78,22 +142,31 @@ def generate_intent_aware(
     changed_file: ChangedFile,
     diff_context: DiffContext,
     config: CatchTestConfig,
+    telemetry_ctx: TelemetryContext | None = None,
 ) -> list[GeneratedTest]:
     """Intent-aware test generation workflow (3 LLM calls)."""
     # Step 1: Infer intent and risks
-    intent, risks = infer_intent(client, diff_context, changed_file)
+    intent, risks = infer_intent(client, diff_context, changed_file, telemetry_ctx)
 
     if not risks:
         logger.info("No risks identified for %s, skipping", changed_file.path)
         return []
 
     # Step 2: Generate tests targeting each risk
+    hunk_text = "\n".join(changed_file.diff_hunks)
+    production_context = ""
+    if telemetry_ctx and telemetry_ctx.has_data:
+        from catchtest.telemetry.formatter import format_for_test_generation
+        production_context = format_for_test_generation(telemetry_ctx, changed_file)
+
     system, messages = build_intent_aware_prompt(
         file_path=changed_file.path,
         language=changed_file.language,
-        parent_content=changed_file.parent_content[:5000],
+        parent_content=_extract_focused_context(changed_file.parent_content, changed_file.diff_hunks, max_chars=5000),
+        diff_text=hunk_text[:3000],
         risks=risks[:config.test.max_tests_per_diff],
         framework=config.test.framework,
+        production_context=production_context,
     )
 
     try:
@@ -132,17 +205,24 @@ def generate_dodgy_diff(
     changed_file: ChangedFile,
     diff_context: DiffContext,
     config: CatchTestConfig,
+    telemetry_ctx: TelemetryContext | None = None,
 ) -> list[GeneratedTest]:
     """Dodgy diff test generation workflow (1 LLM call)."""
     hunk_text = "\n".join(changed_file.diff_hunks)
 
+    production_context = ""
+    if telemetry_ctx and telemetry_ctx.has_data:
+        from catchtest.telemetry.formatter import format_for_test_generation
+        production_context = format_for_test_generation(telemetry_ctx, changed_file)
+
     system, messages = build_dodgy_diff_prompt(
         file_path=changed_file.path,
         language=changed_file.language,
-        parent_content=changed_file.parent_content[:5000],
-        child_content=changed_file.child_content[:5000],
+        parent_content=_extract_focused_context(changed_file.parent_content, changed_file.diff_hunks, max_chars=5000),
+        child_content=_extract_focused_context(changed_file.child_content, changed_file.diff_hunks, max_chars=5000),
         diff_text=hunk_text[:3000],
         framework=config.test.framework,
+        production_context=production_context,
     )
 
     try:

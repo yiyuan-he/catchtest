@@ -52,6 +52,7 @@ def build_judge_prompt(
     test_code: str,
     failure_message: str,
     failure_traceback: str,
+    production_impact: str = "",
 ) -> tuple[str, list[dict]]:
     """Build the system prompt and messages for LLM judge assessment."""
     user_content = USER_PROMPT_TEMPLATE.format(
@@ -61,5 +62,7 @@ def build_judge_prompt(
         failure_message=failure_message or "No failure message captured",
         failure_traceback=failure_traceback or "No traceback captured",
     )
+    if production_impact:
+        user_content += "\n\n## Production Impact\n" + production_impact
 
     return SYSTEM_PROMPT, [{"role": "user", "content": user_content}]

@@ -32,6 +32,8 @@ def cli():
 @click.option("--model", default=None, help="LLM model override")
 @click.option("--aws-region", default=None, help="AWS region for Bedrock provider")
 @click.option("--aws-profile", default=None, help="AWS profile for Bedrock provider")
+@click.option("--telemetry-db", type=click.Path(exists=True), default=None,
+              help="Path to Shift-left SDK telemetry SQLite database")
 @click.option("--dry-run", is_flag=True, help="Generate tests but do not execute")
 @click.option("--verbose", is_flag=True, help="Show detailed output")
 @click.option(
@@ -50,6 +52,7 @@ def run(
     model: str | None,
     aws_region: str | None,
     aws_profile: str | None,
+    telemetry_db: str | None,
     dry_run: bool,
     verbose: bool,
     output_format: str | None,
@@ -68,6 +71,7 @@ def run(
         "verbose": verbose,
         "format": output_format,
     })
+    config.telemetry_db = telemetry_db
 
     _run_pipeline(config, base, target, file_filter, workflow, dry_run)
 
@@ -119,15 +123,23 @@ def _run_pipeline(
 
     click.echo(f"Found changes in {len(diff_context.changed_files)} file(s)")
 
+    # Load telemetry if configured
+    telemetry_ctx = None
+    if config.telemetry_db:
+        from catchtest.telemetry.reader import load_telemetry_for_diff
+        telemetry_ctx = load_telemetry_for_diff(config.telemetry_db, diff_context.changed_files)
+        if telemetry_ctx.has_data:
+            logger.info("Loaded production telemetry for %d function(s)", len(telemetry_ctx.function_telemetry))
+
     # Step 2: Generate tests
     click.echo("Generating tests...")
     generated_tests = []
     for changed_file in diff_context.changed_files:
         try:
             if workflow in ("intent", "both"):
-                generated_tests += generate_intent_aware(client, changed_file, diff_context, config)
+                generated_tests += generate_intent_aware(client, changed_file, diff_context, config, telemetry_ctx)
             if workflow in ("dodgy", "both"):
-                generated_tests += generate_dodgy_diff(client, changed_file, diff_context, config)
+                generated_tests += generate_dodgy_diff(client, changed_file, diff_context, config, telemetry_ctx)
         except Exception as e:
             logger.warning("Failed to generate tests for %s: %s", changed_file.path, e)
 
@@ -166,6 +178,7 @@ def _run_pipeline(
             try:
                 llm_score, judge_data = assess_llm_judge(
                     client, catch, diff_context,
+                    telemetry_ctx=telemetry_ctx,
                 )
             except Exception as e:
                 logger.warning("LLM judge failed: %s", e)

@@ -15,6 +15,11 @@ File: {file_path}
 {parent_content}
 ```
 
+## Diff (what changed)
+```
+{diff_text}
+```
+
 ## Identified Risks
 {risks}
 
@@ -86,8 +91,10 @@ def build_intent_aware_prompt(
     file_path: str,
     language: str,
     parent_content: str,
+    diff_text: str,
     risks: list[str],
     framework: str,
+    production_context: str = "",
 ) -> tuple[str, list[dict]]:
     """Build prompt for intent-aware test generation."""
     risks_text = "\n".join(f"- {risk}" for risk in risks)
@@ -95,9 +102,12 @@ def build_intent_aware_prompt(
         file_path=file_path,
         language=language,
         parent_content=parent_content,
+        diff_text=diff_text,
         risks=risks_text,
         framework=framework,
     )
+    if production_context:
+        user_content += "\n\n" + production_context
     return SYSTEM_PROMPT, [{"role": "user", "content": user_content}]
 
 
@@ -108,6 +118,7 @@ def build_dodgy_diff_prompt(
     child_content: str,
     diff_text: str,
     framework: str,
+    production_context: str = "",
 ) -> tuple[str, list[dict]]:
     """Build prompt for dodgy diff test generation."""
     user_content = DODGY_DIFF_TEMPLATE.format(
@@ -118,4 +129,6 @@ def build_dodgy_diff_prompt(
         diff_text=diff_text,
         framework=framework,
     )
+    if production_context:
+        user_content += "\n\n" + production_context
     return SYSTEM_PROMPT, [{"role": "user", "content": user_content}]

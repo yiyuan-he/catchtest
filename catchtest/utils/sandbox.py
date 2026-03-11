@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -87,11 +88,21 @@ def run_test_in_worktree(
         else:
             raise ValueError(f"Unsupported test framework: {framework}")
 
+        # Prepend worktree to PYTHONPATH so its source takes precedence over
+        # any editable install. Handle both src-layout and flat-layout.
+        env = os.environ.copy()
+        src_dir = worktree_path / "src"
+        if src_dir.is_dir():
+            env["PYTHONPATH"] = f"{src_dir}{os.pathsep}{env.get('PYTHONPATH', '')}"
+        else:
+            env["PYTHONPATH"] = f"{worktree_path}{os.pathsep}{env.get('PYTHONPATH', '')}"
+
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             cwd=worktree_path,
+            env=env,
             timeout=timeout,
         )
         passed = result.returncode == 0

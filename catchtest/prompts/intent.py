@@ -47,6 +47,7 @@ def build_intent_prompt(
     diff_text: str,
     changed_files_summary: str,
     file_context: str,
+    telemetry_section: str = "",
 ) -> tuple[str, list[dict]]:
     """Build the system prompt and messages for intent inference."""
     user_content = USER_PROMPT_TEMPLATE.format(
@@ -55,4 +56,6 @@ def build_intent_prompt(
         diff_text=diff_text,
         file_context=file_context,
     )
+    if telemetry_section:
+        user_content += "\n\n" + telemetry_section
     return SYSTEM_PROMPT, [{"role": "user", "content": user_content}]

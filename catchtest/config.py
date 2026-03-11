@@ -53,6 +53,7 @@ class CatchTestConfig:
     test: TestConfig = field(default_factory=TestConfig)
     assessment: AssessmentConfig = field(default_factory=AssessmentConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    telemetry_db: str | None = None
 
 
 def _merge_dict_into_dataclass(dc: object, data: dict) -> None:
