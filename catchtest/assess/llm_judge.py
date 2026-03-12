@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
@@ -18,6 +19,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_MAX_JUDGE_ATTEMPTS = 2
+
 # Score mapping from classification + is_unexpected
 _SCORE_MAP = {
     ("HIGH", True): 1.0,
@@ -27,6 +30,53 @@ _SCORE_MAP = {
     ("LOW", True): 0.0,
     ("LOW", False): -1.0,
 }
+
+
+def _parse_judge_json(raw: str) -> dict:
+    """Parse a judge response, tolerating common LLM formatting mistakes.
+
+    Tries, in order:
+      1. Direct ``json.loads`` on the full text (after stripping markdown fences).
+      2. Extract the outermost ``{…}`` block and ``json.loads`` it.
+      3. ``ast.literal_eval`` on the extracted block (handles single-quoted keys,
+         Python booleans ``True``/``False``/``None``, and apostrophes inside values).
+
+    Raises ``ValueError`` if none of the strategies succeed.
+    """
+    text = raw.strip()
+
+    # Strip markdown fences
+    if text.startswith("```"):
+        lines = text.split("\n")
+        lines = [l for l in lines[1:] if not l.strip().startswith("```")]
+        text = "\n".join(lines)
+
+    # 1. Try direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Extract outermost {…} and try json.loads
+    match = re.search(r"\{[\s\S]*\}", text)
+    if not match:
+        raise ValueError("No JSON object found in response")
+
+    fragment = match.group()
+    try:
+        return json.loads(fragment)
+    except json.JSONDecodeError:
+        pass
+
+    # 3. ast.literal_eval handles single quotes, True/False/None
+    try:
+        result = ast.literal_eval(fragment)
+        if isinstance(result, dict):
+            return result
+    except (ValueError, SyntaxError):
+        pass
+
+    raise ValueError(f"All parse strategies failed on: {fragment[:200]}")
 
 
 def assess_llm_judge(
@@ -58,45 +108,31 @@ def assess_llm_judge(
         production_impact=production_impact,
     )
 
-    usage = TokenUsage()
-    try:
-        response, usage = client.complete(system=system, messages=messages)
-        # Strip markdown fences if present
-        text = response.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            lines = [l for l in lines[1:] if not l.strip().startswith("```")]
-            text = "\n".join(lines)
+    total_usage = TokenUsage()
+    parsed = None
+    last_error = ""
 
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        # Fallback: extract JSON object when LLM returns narrative before/after JSON
-        match = re.search(r"\{[\s\S]*\}", text)
-        if match:
-            try:
-                parsed = json.loads(match.group())
-            except json.JSONDecodeError:
-                # Handle single-quoted JSON (common LLM mistake)
-                try:
-                    fixed = match.group().replace("'", '"')
-                    # Fix True/False/None from Python-style to JSON-style
-                    fixed = re.sub(r'\bTrue\b', 'true', fixed)
-                    fixed = re.sub(r'\bFalse\b', 'false', fixed)
-                    fixed = re.sub(r'\bNone\b', 'null', fixed)
-                    parsed = json.loads(fixed)
-                except json.JSONDecodeError as e:
-                    logger.warning("Failed to parse LLM judge response: %s", e)
-                    return 0.0, {"classification": "UNKNOWN", "explanation": str(e)}, usage
-        else:
-            logger.warning("Failed to parse LLM judge response: no JSON found")
-            return 0.0, {"classification": "UNKNOWN", "explanation": "No JSON found in response"}, usage
-    except Exception as e:
-        logger.warning("Failed to parse LLM judge response: %s", e)
-        return 0.0, {"classification": "UNKNOWN", "explanation": str(e)}, usage
+    for attempt in range(_MAX_JUDGE_ATTEMPTS):
+        try:
+            response, usage = client.complete(system=system, messages=messages)
+            total_usage.input_tokens += usage.input_tokens
+            total_usage.output_tokens += usage.output_tokens
+
+            parsed = _parse_judge_json(response)
+            break
+        except Exception as e:
+            last_error = str(e)
+            if attempt < _MAX_JUDGE_ATTEMPTS - 1:
+                logger.debug("Judge parse failed (attempt %d), retrying: %s", attempt + 1, e)
+            else:
+                logger.warning("Failed to parse LLM judge response after %d attempts: %s", _MAX_JUDGE_ATTEMPTS, e)
+
+    if parsed is None:
+        return 0.0, {"classification": "UNKNOWN", "explanation": last_error}, total_usage
 
     classification = parsed.get("classification", "MEDIUM").upper()
     is_unexpected = parsed.get("is_unexpected", False)
 
     score = _SCORE_MAP.get((classification, is_unexpected), 0.0)
 
-    return score, parsed, usage
+    return score, parsed, total_usage
