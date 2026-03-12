@@ -73,14 +73,17 @@ def is_git_repo(path: Path | None = None) -> bool:
         return False
 
 
-def get_origin_head(cwd: Path | None = None) -> str:
-    """Resolve origin/HEAD to its target ref (e.g. origin/main)."""
+def get_remote_head(cwd: Path | None = None) -> str:
+    """Resolve the remote tracking branch for the current branch (e.g. origin/feature-branch)."""
     try:
-        return _run_git("rev-parse", "--abbrev-ref", "origin/HEAD", cwd=cwd).strip()
+        return _run_git(
+            "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}",
+            cwd=cwd,
+        ).strip()
     except GitError:
         raise GitError(
-            "Cannot resolve origin/HEAD. Run 'git remote set-head origin --auto' "
-            "to configure it, or pass --base explicitly."
+            "No remote tracking branch for the current branch. "
+            "Push your branch or pass --base explicitly."
         )
 
 

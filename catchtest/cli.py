@@ -19,7 +19,7 @@ def cli():
 
 
 @cli.command()
-@click.option("--base", default=None, help="Base revision (default: origin/HEAD)")
+@click.option("--base", default=None, help="Base revision (default: remote tracking branch)")
 @click.option("--target", default="HEAD", help="Target revision (child)")
 @click.option("--file", "file_filter", default=None, help="Only test changes in this file")
 @click.option(
@@ -64,9 +64,9 @@ def run(
 
     # Resolve --base default
     if base is None:
-        from catchtest.utils.git import get_origin_head, GitError
+        from catchtest.utils.git import get_remote_head, GitError
         try:
-            base = get_origin_head()
+            base = get_remote_head()
             click.echo(f"Using base: {base}")
         except GitError as e:
             click.echo(f"Error: {e}", err=True)
