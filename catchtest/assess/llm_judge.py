@@ -7,6 +7,7 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
+from catchtest.llm import TokenUsage
 from catchtest.prompts.judge import build_judge_prompt
 
 if TYPE_CHECKING:
@@ -34,10 +35,10 @@ def assess_llm_judge(
     diff_context: DiffContext,
     intent: str = "",
     telemetry_ctx: TelemetryContext | None = None,
-) -> tuple[float, dict]:
+) -> tuple[float, dict, TokenUsage]:
     """Use an LLM to classify whether a weak catch is a real bug.
 
-    Returns (score, judge_response_dict).
+    Returns (score, judge_response_dict, token_usage).
     """
     production_impact = ""
     if telemetry_ctx and telemetry_ctx.has_data:
@@ -57,8 +58,9 @@ def assess_llm_judge(
         production_impact=production_impact,
     )
 
+    usage = TokenUsage()
     try:
-        response = client.complete(system=system, messages=messages)
+        response, usage = client.complete(system=system, messages=messages)
         # Strip markdown fences if present
         text = response.strip()
         if text.startswith("```"):
@@ -73,19 +75,28 @@ def assess_llm_judge(
         if match:
             try:
                 parsed = json.loads(match.group())
-            except json.JSONDecodeError as e:
-                logger.warning("Failed to parse LLM judge response: %s", e)
-                return 0.0, {"classification": "UNKNOWN", "explanation": str(e)}
+            except json.JSONDecodeError:
+                # Handle single-quoted JSON (common LLM mistake)
+                try:
+                    fixed = match.group().replace("'", '"')
+                    # Fix True/False/None from Python-style to JSON-style
+                    fixed = re.sub(r'\bTrue\b', 'true', fixed)
+                    fixed = re.sub(r'\bFalse\b', 'false', fixed)
+                    fixed = re.sub(r'\bNone\b', 'null', fixed)
+                    parsed = json.loads(fixed)
+                except json.JSONDecodeError as e:
+                    logger.warning("Failed to parse LLM judge response: %s", e)
+                    return 0.0, {"classification": "UNKNOWN", "explanation": str(e)}, usage
         else:
             logger.warning("Failed to parse LLM judge response: no JSON found")
-            return 0.0, {"classification": "UNKNOWN", "explanation": "No JSON found in response"}
+            return 0.0, {"classification": "UNKNOWN", "explanation": "No JSON found in response"}, usage
     except Exception as e:
         logger.warning("Failed to parse LLM judge response: %s", e)
-        return 0.0, {"classification": "UNKNOWN", "explanation": str(e)}
+        return 0.0, {"classification": "UNKNOWN", "explanation": str(e)}, usage
 
     classification = parsed.get("classification", "MEDIUM").upper()
     is_unexpected = parsed.get("is_unexpected", False)
 
     score = _SCORE_MAP.get((classification, is_unexpected), 0.0)
 
-    return score, parsed
+    return score, parsed, usage

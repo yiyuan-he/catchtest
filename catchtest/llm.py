@@ -8,10 +8,17 @@ from __future__ import annotations
 import json
 import os
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from catchtest.config import LLMConfig
+
+
+@dataclass
+class TokenUsage:
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class LLMClient(ABC):
@@ -24,8 +31,8 @@ class LLMClient(ABC):
         messages: list[dict],
         max_tokens: int = 4096,
         temperature: float = 0.0,
-    ) -> str:
-        """Send a completion request, return the response text."""
+    ) -> tuple[str, TokenUsage]:
+        """Send a completion request, return the response text and token usage."""
         ...
 
 
@@ -50,7 +57,7 @@ class AnthropicClient(LLMClient):
         messages: list[dict],
         max_tokens: int = 4096,
         temperature: float = 0.0,
-    ) -> str:
+    ) -> tuple[str, TokenUsage]:
         response = self._client.messages.create(
             model=self._model,
             max_tokens=max_tokens,
@@ -58,7 +65,8 @@ class AnthropicClient(LLMClient):
             system=system,
             messages=messages,
         )
-        return response.content[0].text
+        usage = TokenUsage(response.usage.input_tokens, response.usage.output_tokens)
+        return response.content[0].text, usage
 
 
 class BedrockClient(LLMClient):
@@ -97,7 +105,7 @@ class BedrockClient(LLMClient):
         messages: list[dict],
         max_tokens: int = 4096,
         temperature: float = 0.0,
-    ) -> str:
+    ) -> tuple[str, TokenUsage]:
         # Build converse API request
         converse_messages = []
         for msg in messages:
@@ -124,7 +132,9 @@ class BedrockClient(LLMClient):
         except Exception as e:
             raise RuntimeError(f"Bedrock API call failed: {e}")
 
-        return response["output"]["message"]["content"][0]["text"]
+        resp_usage = response.get("usage", {})
+        usage = TokenUsage(resp_usage.get("inputTokens", 0), resp_usage.get("outputTokens", 0))
+        return response["output"]["message"]["content"][0]["text"], usage
 
 
 class OpenAIClient(LLMClient):
@@ -153,7 +163,7 @@ class OpenAIClient(LLMClient):
         messages: list[dict],
         max_tokens: int = 4096,
         temperature: float = 0.0,
-    ) -> str:
+    ) -> tuple[str, TokenUsage]:
         oai_messages = []
         if system:
             oai_messages.append({"role": "system", "content": system})
@@ -165,7 +175,8 @@ class OpenAIClient(LLMClient):
             max_tokens=max_tokens,
             temperature=temperature,
         )
-        return response.choices[0].message.content
+        usage = TokenUsage(response.usage.prompt_tokens, response.usage.completion_tokens) if response.usage else TokenUsage()
+        return response.choices[0].message.content, usage
 
 
 class OllamaClient(LLMClient):
@@ -190,7 +201,7 @@ class OllamaClient(LLMClient):
         messages: list[dict],
         max_tokens: int = 4096,
         temperature: float = 0.0,
-    ) -> str:
+    ) -> tuple[str, TokenUsage]:
         oai_messages = []
         if system:
             oai_messages.append({"role": "system", "content": system})
@@ -202,7 +213,8 @@ class OllamaClient(LLMClient):
             max_tokens=max_tokens,
             temperature=temperature,
         )
-        return response.choices[0].message.content
+        usage = TokenUsage(response.usage.prompt_tokens, response.usage.completion_tokens) if response.usage else TokenUsage()
+        return response.choices[0].message.content, usage
 
 
 def create_client(config: LLMConfig) -> LLMClient:

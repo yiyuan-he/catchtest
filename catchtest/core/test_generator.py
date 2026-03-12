@@ -8,6 +8,7 @@ import re
 from typing import TYPE_CHECKING
 
 from catchtest.core.weak_catch import GeneratedTest
+from catchtest.llm import TokenUsage
 from catchtest.prompts.generate import build_dodgy_diff_prompt, build_intent_aware_prompt
 from catchtest.prompts.intent import build_intent_prompt
 
@@ -100,10 +101,10 @@ def infer_intent(
     diff_context: DiffContext,
     changed_file: ChangedFile,
     telemetry_ctx: TelemetryContext | None = None,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], TokenUsage]:
     """Infer the intent and risks of a diff using an LLM.
 
-    Returns (intent_text, list_of_risks).
+    Returns (intent_text, list_of_risks, token_usage).
     """
     files_summary = "\n".join(
         f"- {f.path} ({f.language}): functions changed: {', '.join(f.changed_functions) or 'N/A'}"
@@ -127,14 +128,14 @@ def infer_intent(
     )
 
     try:
-        response = client.complete(system=system, messages=messages)
+        response, usage = client.complete(system=system, messages=messages)
         parsed = _parse_json_response(response)
         intent = parsed.get("intent", "Unknown intent")
         risks = parsed.get("risks", [])
-        return intent, risks
+        return intent, risks, usage
     except (json.JSONDecodeError, KeyError) as e:
         logger.warning("Failed to parse intent response: %s", e)
-        return "Could not infer intent", ["General regression risk"]
+        return "Could not infer intent", ["General regression risk"], TokenUsage()
 
 
 def generate_intent_aware(
@@ -143,14 +144,20 @@ def generate_intent_aware(
     diff_context: DiffContext,
     config: CatchTestConfig,
     telemetry_ctx: TelemetryContext | None = None,
-) -> list[GeneratedTest]:
-    """Intent-aware test generation workflow (3 LLM calls)."""
+) -> tuple[list[GeneratedTest], list[tuple[str, TokenUsage]]]:
+    """Intent-aware test generation workflow (2 LLM calls).
+
+    Returns (generated_tests, list of (call_label, usage) pairs).
+    """
+    all_usage: list[tuple[str, TokenUsage]] = []
+
     # Step 1: Infer intent and risks
-    intent, risks = infer_intent(client, diff_context, changed_file, telemetry_ctx)
+    intent, risks, intent_usage = infer_intent(client, diff_context, changed_file, telemetry_ctx)
+    all_usage.append(("intent", intent_usage))
 
     if not risks:
         logger.info("No risks identified for %s, skipping", changed_file.path)
-        return []
+        return [], all_usage
 
     # Step 2: Generate tests targeting each risk
     hunk_text = "\n".join(changed_file.diff_hunks)
@@ -170,12 +177,13 @@ def generate_intent_aware(
     )
 
     try:
-        response = client.complete(system=system, messages=messages)
+        response, gen_usage = client.complete(system=system, messages=messages)
+        all_usage.append(("generate", gen_usage))
         parsed = _parse_json_response(response)
         raw_tests = parsed.get("tests", [])
     except (json.JSONDecodeError, KeyError) as e:
         logger.warning("Failed to parse test generation response: %s", e)
-        return []
+        return [], all_usage
 
     # Step 3: Validate and filter
     generated = []
@@ -197,7 +205,7 @@ def generate_intent_aware(
             workflow="intent",
         ))
 
-    return generated[:config.test.max_tests_per_diff]
+    return generated[:config.test.max_tests_per_diff], all_usage
 
 
 def generate_dodgy_diff(
@@ -206,8 +214,11 @@ def generate_dodgy_diff(
     diff_context: DiffContext,
     config: CatchTestConfig,
     telemetry_ctx: TelemetryContext | None = None,
-) -> list[GeneratedTest]:
-    """Dodgy diff test generation workflow (1 LLM call)."""
+) -> tuple[list[GeneratedTest], list[tuple[str, TokenUsage]]]:
+    """Dodgy diff test generation workflow (1 LLM call).
+
+    Returns (generated_tests, list of (call_label, usage) pairs).
+    """
     hunk_text = "\n".join(changed_file.diff_hunks)
 
     production_context = ""
@@ -225,13 +236,15 @@ def generate_dodgy_diff(
         production_context=production_context,
     )
 
+    all_usage: list[tuple[str, TokenUsage]] = []
     try:
-        response = client.complete(system=system, messages=messages)
+        response, gen_usage = client.complete(system=system, messages=messages)
+        all_usage.append(("generate", gen_usage))
         parsed = _parse_json_response(response)
         raw_tests = parsed.get("tests", [])
     except (json.JSONDecodeError, KeyError) as e:
         logger.warning("Failed to parse dodgy diff response: %s", e)
-        return []
+        return [], all_usage
 
     generated = []
     for test_data in raw_tests:
@@ -251,4 +264,4 @@ def generate_dodgy_diff(
             workflow="dodgy",
         ))
 
-    return generated[:config.test.max_tests_per_diff]
+    return generated[:config.test.max_tests_per_diff], all_usage

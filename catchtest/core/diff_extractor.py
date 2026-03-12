@@ -93,8 +93,14 @@ def _parse_hunks(diff_text: str, file_path: str) -> list[str]:
     return hunks
 
 
-def _extract_changed_functions(hunks: list[str], language: str) -> list[str]:
-    """Find function names touched by diff hunks."""
+def _extract_changed_functions(
+    hunks: list[str], language: str, parent_content: str = ""
+) -> list[str]:
+    """Find function names touched by diff hunks.
+
+    First checks hunk lines for function defs. If none found, scans backwards
+    from each hunk's start line in the parent file to find the enclosing function.
+    """
     pattern = FUNCTION_PATTERNS.get(language)
     if not pattern:
         return []
@@ -110,6 +116,23 @@ def _extract_changed_functions(hunks: list[str], language: str) -> list[str]:
                 name = next((g for g in match.groups() if g is not None), None)
                 if name:
                     functions.add(name)
+
+    # Fallback: scan parent content backwards from hunk start lines
+    if not functions and parent_content:
+        parent_lines = parent_content.splitlines()
+        for hunk in hunks:
+            hunk_match = re.search(r"@@ -(\d+)", hunk)
+            if not hunk_match:
+                continue
+            start_line = int(hunk_match.group(1))
+            # Scan backwards from the hunk start to find enclosing function
+            for i in range(min(start_line - 1, len(parent_lines) - 1), -1, -1):
+                match = pattern.search(parent_lines[i])
+                if match:
+                    name = next((g for g in match.groups() if g is not None), None)
+                    if name:
+                        functions.add(name)
+                        break
 
     return sorted(functions)
 
@@ -134,7 +157,7 @@ def extract_diff(
         hunks = _parse_hunks(diff_text, file_path)
         parent_content = get_file_at_ref(base, file_path, cwd=cwd)
         child_content = get_file_at_ref(target, file_path, cwd=cwd)
-        changed_functions = _extract_changed_functions(hunks, language)
+        changed_functions = _extract_changed_functions(hunks, language, parent_content)
 
         changed_files.append(ChangedFile(
             path=file_path,

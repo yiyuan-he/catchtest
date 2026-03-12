@@ -91,7 +91,7 @@ def _run_pipeline(
     from catchtest.core.diff_extractor import extract_diff
     from catchtest.core.test_generator import generate_dodgy_diff, generate_intent_aware, infer_intent
     from catchtest.core.test_runner import run_and_find_catches
-    from catchtest.llm import create_client
+    from catchtest.llm import TokenUsage, create_client
     from catchtest.output.reporter import report, report_dry_run
     from catchtest.utils.git import is_git_repo
 
@@ -123,23 +123,35 @@ def _run_pipeline(
 
     click.echo(f"Found changes in {len(diff_context.changed_files)} file(s)")
 
+    # Measure total chars of changed source files (for static analysis estimate)
+    codebase_chars = sum(len(cf.child_content or "") + len(cf.parent_content or "")
+                        for cf in diff_context.changed_files) // 2  # average of parent/child
+
     # Load telemetry if configured
     telemetry_ctx = None
+    telemetry_chars = 0
     if config.telemetry_db:
         from catchtest.telemetry.reader import load_telemetry_for_diff
         telemetry_ctx = load_telemetry_for_diff(config.telemetry_db, diff_context.changed_files)
-        if telemetry_ctx.has_data:
+        if telemetry_ctx and telemetry_ctx.has_data:
+            from catchtest.telemetry.formatter import format_for_risk_analysis
+            telemetry_chars = len(format_for_risk_analysis(telemetry_ctx))
             logger.info("Loaded production telemetry for %d function(s)", len(telemetry_ctx.function_telemetry))
 
     # Step 2: Generate tests
     click.echo("Generating tests...")
     generated_tests = []
+    all_usage: list[tuple[str, TokenUsage]] = []
     for changed_file in diff_context.changed_files:
         try:
             if workflow in ("intent", "both"):
-                generated_tests += generate_intent_aware(client, changed_file, diff_context, config, telemetry_ctx)
+                tests, usage_list = generate_intent_aware(client, changed_file, diff_context, config, telemetry_ctx)
+                generated_tests += tests
+                all_usage.extend(usage_list)
             if workflow in ("dodgy", "both"):
-                generated_tests += generate_dodgy_diff(client, changed_file, diff_context, config, telemetry_ctx)
+                tests, usage_list = generate_dodgy_diff(client, changed_file, diff_context, config, telemetry_ctx)
+                generated_tests += tests
+                all_usage.extend(usage_list)
         except Exception as e:
             logger.warning("Failed to generate tests for %s: %s", changed_file.path, e)
 
@@ -176,10 +188,11 @@ def _run_pipeline(
         llm_score = 0.0
         if config.assessment.enable_llm_judge:
             try:
-                llm_score, judge_data = assess_llm_judge(
+                llm_score, judge_data, judge_usage = assess_llm_judge(
                     client, catch, diff_context,
                     telemetry_ctx=telemetry_ctx,
                 )
+                all_usage.append(("judge", judge_usage))
             except Exception as e:
                 logger.warning("LLM judge failed: %s", e)
 
@@ -201,6 +214,84 @@ def _run_pipeline(
     # Step 5: Report results
     verbose = config.output.verbosity == "verbose"
     report(assessed, output_format=config.output.format, verbose=verbose)
+
+    # Step 6: Print token usage summary
+    _print_token_summary(all_usage, assessed, len(weak_catches), telemetry_chars, codebase_chars)
+
+
+def _print_token_summary(
+    all_usage: list[tuple[str, object]],
+    assessed: list[tuple],
+    weak_catch_count: int = 0,
+    telemetry_chars: int = 0,
+    codebase_chars: int = 0,
+) -> None:
+    """Print a token usage summary table after the results report."""
+    from collections import defaultdict
+
+    # Aggregate by call label
+    counts: dict[str, int] = defaultdict(int)
+    input_totals: dict[str, int] = defaultdict(int)
+    output_totals: dict[str, int] = defaultdict(int)
+
+    for label, usage in all_usage:
+        counts[label] += 1
+        input_totals[label] += usage.input_tokens
+        output_totals[label] += usage.output_tokens
+
+    if not counts:
+        return
+
+    click.echo("")
+    click.echo("Token Usage:")
+
+    total_in = 0
+    total_out = 0
+    total_calls = 0
+    for label in ("intent", "generate", "judge"):
+        if label not in counts:
+            continue
+        inp = input_totals[label]
+        out = output_totals[label]
+        n = counts[label]
+        total_in += inp
+        total_out += out
+        total_calls += n
+        click.echo(f"  {label + ':':<11} {inp:>7,} in / {out:>6,} out   ({n} call{'s' if n != 1 else ''})")
+
+    click.echo("  " + "\u2500" * 37)
+    click.echo(f"  {'Total:':<11} {total_in:>7,} in / {total_out:>6,} out   ({total_calls} call{'s' if total_calls != 1 else ''})")
+
+    # Efficiency metrics
+    likely_bugs = sum(1 for _, _, verdict, _ in assessed if verdict == "LIKELY_BUG")
+
+    click.echo("")
+    click.echo("Efficiency:")
+    click.echo(f"  Catches:      {likely_bugs} likely bug(s) / {weak_catch_count} weak catches")
+    if weak_catch_count > 0:
+        precision = likely_bugs / weak_catch_count * 100
+        click.echo(f"  Precision:    {precision:.1f}%   (likely bugs / weak catches)")
+    if total_calls > 0:
+        catch_yield = likely_bugs / total_calls * 100
+        click.echo(f"  Catch yield:  {catch_yield:.1f}%   (likely bugs / LLM calls)")
+    if likely_bugs > 0:
+        click.echo(f"  Tokens/catch: {total_in // likely_bugs:,} input tokens per catch")
+
+    # Context cost comparison (only when telemetry was used)
+    if telemetry_chars > 0 and total_in > 0:
+        telemetry_tokens = telemetry_chars // 4
+        telemetry_pct = telemetry_tokens / total_in * 100
+        static_chars = codebase_chars if codebase_chars > 0 else telemetry_chars * 4
+        static_tokens = static_chars // 4
+        static_pct = static_tokens / total_in * 100
+
+        click.echo("")
+        click.echo("Context cost (telemetry vs static analysis):")
+        click.echo(f"  Telemetry added:     ~{telemetry_chars:,} chars (~{telemetry_tokens:,} tokens, {telemetry_pct:.1f}% of input)")
+        click.echo(f"  Static analysis est: ~{static_chars:,} chars (~{static_tokens:,} tokens, {static_pct:.1f}% of input)")
+        click.echo("    (full source of changed files — structural info only)")
+        click.echo("  Runtime-only signals: traffic volume, exception rates, incidents, latency")
+        click.echo("    (not available from static analysis at any cost)")
 
 
 def _score_to_verdict(score: float) -> str:
