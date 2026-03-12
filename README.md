@@ -16,11 +16,23 @@ git diff → generate failing tests → filter false positives → surface likel
 
 ## Installation
 
+**From GitHub:**
 ```bash
-pip install -e "."
+pip install "catchtest @ git+https://github.com/yourorg/catchtest.git"
 
-# If using Amazon Bedrock as your LLM provider:
+# With Amazon Bedrock support:
+pip install "catchtest[bedrock] @ git+https://github.com/yourorg/catchtest.git"
+
+# Update to the latest version:
+pip install --upgrade "catchtest[bedrock] @ git+https://github.com/yourorg/catchtest.git"
+```
+
+**For development (editable install):**
+```bash
+git clone https://github.com/yourorg/catchtest.git
+cd catchtest
 pip install -e ".[bedrock]"
+# Then just `git pull` to get updates
 ```
 
 ## Setup
@@ -81,8 +93,12 @@ catchtest run --workflow dodgy
 # Verbose output with full test code and tracebacks
 catchtest run --verbose
 
-# Output as JSON (useful for CI)
+# Output as JSON or Markdown (useful for CI / reports)
 catchtest run --format json
+catchtest run --format markdown
+
+# Use runtime telemetry to improve risk analysis (see Telemetry section below)
+catchtest run --telemetry-db /path/to/telemetry.db
 ```
 
 ### Bedrock-specific options
@@ -132,6 +148,18 @@ Run with --verbose to see test code and full failure traces.
 | Amazon Bedrock | `--provider bedrock` | AWS CLI credentials / env vars / IAM role |
 | OpenAI | `--provider openai` | `OPENAI_API_KEY` env var |
 | Ollama | `--provider ollama` | Local, no auth needed |
+
+## Runtime telemetry integration
+
+CatchTest can use production telemetry data to improve its risk analysis and bug classification. When provided with a telemetry database, the LLM gets runtime context like traffic volume, exception rates, latency, and incident history for the functions being changed — signals that static analysis alone cannot provide.
+
+```bash
+catchtest run --base HEAD~1 --target HEAD --telemetry-db /path/to/telemetry.db
+```
+
+The telemetry database is a SQLite file with tables for function mappings, call metrics, endpoint traffic, and incident snapshots. This data can be populated from ADOT/Application Signals auto-instrumentation or any OpenTelemetry-compatible pipeline.
+
+In our benchmarks, adding telemetry context (~0.4% of the input token budget) improved bug detection precision from 44% to 67% and reduced cost per catch by 27%.
 
 ## Development
 
