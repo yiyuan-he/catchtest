@@ -19,7 +19,7 @@ def cli():
 
 
 @cli.command()
-@click.option("--base", default="HEAD~1", help="Base revision (parent)")
+@click.option("--base", default=None, help="Base revision (default: origin/HEAD)")
 @click.option("--target", default="HEAD", help="Target revision (child)")
 @click.option("--file", "file_filter", default=None, help="Only test changes in this file")
 @click.option(
@@ -44,7 +44,7 @@ def cli():
     help="Output format",
 )
 def run(
-    base: str,
+    base: str | None,
     target: str,
     file_filter: str | None,
     workflow: str,
@@ -61,6 +61,16 @@ def run(
     # Set up logging
     log_level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=log_level, format="%(levelname)s: %(message)s")
+
+    # Resolve --base default
+    if base is None:
+        from catchtest.utils.git import get_origin_head, GitError
+        try:
+            base = get_origin_head()
+            click.echo(f"Using base: {base}")
+        except GitError as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
 
     # Load config with CLI overrides
     config = load_config(cli_overrides={

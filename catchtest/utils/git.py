@@ -73,6 +73,17 @@ def is_git_repo(path: Path | None = None) -> bool:
         return False
 
 
+def get_origin_head(cwd: Path | None = None) -> str:
+    """Resolve origin/HEAD to its target ref (e.g. origin/main)."""
+    try:
+        return _run_git("rev-parse", "--abbrev-ref", "origin/HEAD", cwd=cwd).strip()
+    except GitError:
+        raise GitError(
+            "Cannot resolve origin/HEAD. Run 'git remote set-head origin --auto' "
+            "to configure it, or pass --base explicitly."
+        )
+
+
 def get_repo_root(cwd: Path | None = None) -> Path:
     """Get the root directory of the git repository."""
     root = _run_git("rev-parse", "--show-toplevel", cwd=cwd).strip()
